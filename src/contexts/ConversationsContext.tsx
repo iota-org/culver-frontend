@@ -4,6 +4,7 @@ import {
   useState,
   useEffect,
   useCallback,
+  useRef,
 } from 'react';
 import type { ReactNode } from 'react';
 
@@ -33,6 +34,7 @@ export interface Conversation {
 interface ConversationsContextType {
   conversations: Conversation[];
   selectedConversation: Conversation | null;
+  setSelectedConversation: (conv: Conversation | null) => void;
   messages: Record<string, Message[]>;
   selectConversation: (id: string) => void;
   sendMessage: (conversationId: string, content: string) => void;
@@ -171,15 +173,20 @@ export function ConversationsProvider({ children }: { children: ReactNode }) {
     }));
   }, []);
 
+  const conversationsRef = useRef(conversations);
+  useEffect(() => {
+    conversationsRef.current = conversations;
+  }, [conversations]);
+
   const selectConversation = useCallback(
     (id: string) => {
-      const conv = conversations.find((c) => c.id === id);
+      const conv = conversationsRef.current.find((c) => c.id === id);
       if (conv) {
         setSelectedConversation(conv);
         markAsRead(id);
       }
     },
-    [conversations, markAsRead],
+    [markAsRead],
   );
 
   const sendMessage = useCallback((conversationId: string, content: string) => {
@@ -316,6 +323,7 @@ export function ConversationsProvider({ children }: { children: ReactNode }) {
         selectedConversation,
         messages,
         selectConversation,
+        setSelectedConversation,
         sendMessage,
         sendVoiceMessage,
         markAsRead,

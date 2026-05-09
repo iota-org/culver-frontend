@@ -1,50 +1,180 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router';
-import { useAuth } from '../contexts/AuthContext';
+import { useAuth } from '../contexts/useAuth';
 import logoIcon from '../assets/culver/default-monochrome.svg';
-import { Lock } from 'lucide-react';
+import { Lock, ArrowLeft } from 'lucide-react';
+import { RecaptchaVerifier } from 'firebase/auth';
+import { auth } from '../lib/firebase';
+
+type AuthMode = 'login' | 'signup';
+type Step = 'entry' | 'details' | 'otp';
 
 export default function Login() {
-  const [step, setStep] = useState<'phone' | 'otp'>('phone');
+  const [mode, setMode] = useState<AuthMode>('login');
+  const [step, setStep] = useState<Step>('entry');
+
+  // Shared fields
   const [phone, setPhone] = useState('');
   const [otp, setOtp] = useState('');
+
+  // Signup-only fields
+  const [firstName, setFirstName] = useState('');
+  const [lastName, setLastName] = useState('');
+
   const [loading, setLoading] = useState(false);
-  const { login } = useAuth();
+  const [error, setError] = useState<string | null>(null);
+
+  const recaptchaVerifierRef = useRef<RecaptchaVerifier | null>(null);
+  const { sendOtp, verifyOtp } = useAuth();
   const navigate = useNavigate();
 
-  const handleSendOTP = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setLoading(true);
-    await new Promise((r) => setTimeout(r, 1000));
-    setLoading(false);
-    setStep('otp');
+  useEffect(() => {
+    return () => {
+      recaptchaVerifierRef.current?.clear();
+      recaptchaVerifierRef.current = null;
+    };
+  }, []);
+
+  const getRecaptchaVerifier = () => {
+    if (!recaptchaVerifierRef.current) {
+      recaptchaVerifierRef.current = new RecaptchaVerifier(
+        auth,
+        'recaptcha-container',
+        { size: 'invisible' },
+      );
+    }
+    return recaptchaVerifierRef.current;
   };
 
+  const resetRecaptcha = () => {
+    recaptchaVerifierRef.current?.clear();
+    recaptchaVerifierRef.current = null;
+  };
+
+  // Step 1 (login): phone → send OTP
+  // Step 1 (signup): phone → go to details
+  const handlePhoneSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError(null);
+
+    if (mode === 'signup') {
+      // For signup, collect name first before sending OTP
+      setStep('details');
+      return;
+    }
+
+    // Login: send OTP immediately
+    setLoading(true);
+    try {
+      const verifier = getRecaptchaVerifier();
+      await sendOtp(phone.trim(), verifier);
+      setStep('otp');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to send OTP.');
+      resetRecaptcha();
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Step 2 (signup): collect name → send OTP
+  const handleDetailsSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError(null);
+
+    if (!firstName.trim() || !lastName.trim()) {
+      setError('Please enter both first and last name.');
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const verifier = getRecaptchaVerifier();
+      await sendOtp(phone.trim(), verifier);
+      setStep('otp');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to send OTP.');
+      resetRecaptcha();
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Final step: verify OTP
+  // For signup, pass the full name so the backend can create the account
   const handleVerifyOTP = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
-    await login(phone, otp);
-    setLoading(false);
-    navigate('/');
+    setError(null);
+
+    try {
+      const fullName =
+        mode === 'signup'
+          ? `${firstName.trim()} ${lastName.trim()}`
+          : undefined;
+
+      await verifyOtp(otp.trim(), fullName);
+      navigate('/');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to verify OTP.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const switchMode = (newMode: AuthMode) => {
+    setMode(newMode);
+    setStep('entry');
+    setOtp('');
+    setFirstName('');
+    setLastName('');
+    setError(null);
+    resetRecaptcha();
   };
 
   return (
     <div className="min-h-screen grid grid-rows-[1fr,auto] items-end justify-center bg-background px-4">
       <div className="w-full">
+        {/* Logo */}
         <div className="text-center mb-2">
           <div className="inline-flex items-center justify-center rounded-2xl mb-4">
             <img src={logoIcon} alt="Culver" className="w-48 h-48" />
           </div>
-          {/* <h1 className="mb-2">Welcome to Culver</h1>
-          <p className="text-muted-foreground">
-            Secure end-to-end encrypted messaging
-          </p> */}
         </div>
 
         <div className="bg-card border border-border rounded-2xl p-8 shadow-sm w-2xl mx-auto">
-          {step === 'phone' ? (
+          {/* Mode toggle (only show on entry step) */}
+          {step === 'entry' && (
+            <div className="flex rounded-xl bg-muted p-1 mb-8 mx-auto w-sm">
+              <button
+                type="button"
+                onClick={() => switchMode('login')}
+                className={`flex-1 py-2 rounded-lg text-sm font-medium transition-all ${
+                  mode === 'login'
+                    ? 'bg-card text-foreground shadow-sm'
+                    : 'text-muted-foreground hover:text-foreground'
+                }`}
+              >
+                Log in
+              </button>
+              <button
+                type="button"
+                onClick={() => switchMode('signup')}
+                className={`flex-1 py-2 rounded-lg text-sm font-medium transition-all ${
+                  mode === 'signup'
+                    ? 'bg-card text-foreground shadow-sm'
+                    : 'text-muted-foreground hover:text-foreground'
+                }`}
+              >
+                Sign up
+              </button>
+            </div>
+          )}
+
+          {/* STEP: Phone number entry */}
+          {step === 'entry' && (
             <form
-              onSubmit={handleSendOTP}
+              onSubmit={handlePhoneSubmit}
               className="mx-auto w-sm flex flex-col"
             >
               <div className="mb-6">
@@ -52,8 +182,13 @@ export default function Login() {
                   htmlFor="phone"
                   className="text-xl text-center block mb-2 p-4"
                 >
-                  Enter Your Phone Number
+                  {mode === 'login' ? 'Welcome back' : 'Create an account'}
                 </label>
+                {mode === 'signup' && (
+                  <p className="text-sm text-muted-foreground text-center mb-4">
+                    Enter your phone number to get started
+                  </p>
+                )}
                 <input
                   id="phone"
                   type="tel"
@@ -67,55 +202,133 @@ export default function Login() {
               <button
                 type="submit"
                 disabled={loading}
-                className="mx-auto px-4 py-2 gradient-theme text-accent-foreground rounded-xl hover:opacity-90 transition-opacity disabled:opacity-50"
+                className="mx-auto px-6 py-2 gradient-theme text-accent-foreground rounded-xl hover:opacity-90 transition-opacity disabled:opacity-50"
               >
-                {loading ? 'Sending...' : 'Send OTP'}
+                {loading
+                  ? 'Sending...'
+                  : mode === 'login'
+                    ? 'Send OTP'
+                    : 'Continue'}
               </button>
             </form>
-          ) : (
-            <form onSubmit={handleVerifyOTP}>
+          )}
+
+          {/* STEP: Signup — collect name details */}
+          {step === 'details' && mode === 'signup' && (
+            <form
+              onSubmit={handleDetailsSubmit}
+              className="mx-auto w-sm flex flex-col"
+            >
               <div className="mb-6">
-                <label htmlFor="otp" className="block mb-2">
-                  Verification Code
-                </label>
+                <div className="flex items-center gap-3 mb-6">
+                  <button
+                    type="button"
+                    onClick={() => setStep('entry')}
+                    className="p-2 hover:bg-muted rounded-lg transition-colors"
+                  >
+                    <ArrowLeft className="w-4 h-4" />
+                  </button>
+                  <label className="text-xl font-medium">Your name</label>
+                </div>
+                <p className="text-sm text-muted-foreground mb-4">
+                  This is how you'll appear to others on Culver.
+                </p>
+                <div className="space-y-3">
+                  <input
+                    type="text"
+                    value={firstName}
+                    onChange={(e) => setFirstName(e.target.value)}
+                    placeholder="First name"
+                    className="w-full px-4 py-3 bg-input-background border border-input rounded-xl focus:outline-none focus:ring-2 focus:ring-ring placeholder:text-muted-foreground"
+                    required
+                    autoFocus
+                  />
+                  <input
+                    type="text"
+                    value={lastName}
+                    onChange={(e) => setLastName(e.target.value)}
+                    placeholder="Last name"
+                    className="w-full px-4 py-3 bg-input-background border border-input rounded-xl focus:outline-none focus:ring-2 focus:ring-ring placeholder:text-muted-foreground"
+                    required
+                  />
+                </div>
+              </div>
+              <button
+                type="submit"
+                disabled={loading}
+                className="mx-auto px-6 py-2 gradient-theme text-accent-foreground rounded-xl hover:opacity-90 transition-opacity disabled:opacity-50"
+              >
+                {loading ? 'Sending OTP...' : 'Send OTP'}
+              </button>
+            </form>
+          )}
+
+          {/* STEP: OTP verification */}
+          {step === 'otp' && (
+            <form
+              onSubmit={handleVerifyOTP}
+              className="mx-auto w-sm flex flex-col"
+            >
+              <div className="mb-6">
+                <div className="flex items-center gap-3 mb-6">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setStep(mode === 'signup' ? 'details' : 'entry');
+                      setOtp('');
+                      setError(null);
+                    }}
+                    className="p-2 hover:bg-muted rounded-lg transition-colors"
+                  >
+                    <ArrowLeft className="w-4 h-4" />
+                  </button>
+                  <label className="text-xl font-medium">
+                    Verify your number
+                  </label>
+                </div>
+                <p className="text-sm text-muted-foreground mb-4">
+                  Enter the 6-digit code sent to{' '}
+                  <span className="text-foreground font-medium">{phone}</span>
+                </p>
                 <input
                   id="otp"
                   type="text"
                   value={otp}
                   onChange={(e) => setOtp(e.target.value)}
-                  placeholder="Enter 6-digit code"
+                  placeholder="000000"
                   maxLength={6}
-                  className="w-full px-4 py-3 bg-input-background border border-input rounded-xl focus:outline-none focus:ring-2 focus:ring-ring text-center tracking-widest placeholder:text-muted-foreground"
+                  className="w-full px-4 py-3 bg-input-background border border-input rounded-xl focus:outline-none focus:ring-2 focus:ring-ring text-center tracking-[0.5em] text-lg placeholder:tracking-normal placeholder:text-muted-foreground"
                   required
+                  autoFocus
                 />
-                <p className="text-sm text-muted-foreground mt-2">
-                  Code sent to {phone}
-                </p>
               </div>
               <button
                 type="submit"
                 disabled={loading}
-                className="w-full px-4 py-2 gradient-theme text-accent-foreground rounded-xl hover:opacity-90 transition-opacity disabled:opacity-50 mb-3"
+                className="mx-auto px-6 py-2 gradient-theme text-accent-foreground rounded-xl hover:opacity-90 transition-opacity disabled:opacity-50"
               >
-                {loading ? 'Verifying...' : 'Verify & Continue'}
-              </button>
-              <button
-                type="button"
-                onClick={() => setStep('phone')}
-                className="w-full px-4 py-3 text-muted-foreground hover:text-foreground transition-colors"
-              >
-                Change phone number
+                {loading
+                  ? 'Verifying...'
+                  : mode === 'login'
+                    ? 'Log in'
+                    : 'Create account'}
               </button>
             </form>
           )}
+
+          {error && (
+            <p className="text-sm text-destructive mt-4 text-center">{error}</p>
+          )}
+
+          <div id="recaptcha-container" />
         </div>
       </div>
-      <div className="m-6 space-y-6">
+
+      <div className="m-6 space-y-4">
         <p className="mx-auto flex justify-center gap-2 text-muted-foreground">
           <Lock className="" />
           Secure end-to-end encrypted messaging
         </p>
-
         <p className="text-center text-sm text-muted-foreground">
           By continuing, you agree to Culver's Terms of Service and Privacy
           Policy

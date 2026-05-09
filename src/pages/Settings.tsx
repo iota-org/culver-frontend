@@ -9,15 +9,15 @@ import {
 } from 'lucide-react';
 import { useNavigate } from 'react-router';
 import { useTheme } from '../contexts/ThemeContext';
-import { useAuth } from '../contexts/AuthContext';
+import { useAuth } from '../contexts/useAuth';
 
 export default function Settings() {
   const navigate = useNavigate();
   const { theme, toggleTheme } = useTheme();
   const { logout } = useAuth();
 
-  const handleLogout = () => {
-    logout();
+  const handleLogout = async () => {
+    await logout();
     navigate('/login');
   };
 
@@ -121,7 +121,7 @@ export default function Settings() {
                 <div className="text-left">
                   <p className="font-medium">Privacy</p>
                   <p className="text-sm text-muted-foreground">
-                    Last seen, profile photo, about
+                    Last seen, profile photo, bio
                   </p>
                 </div>
               </button>
@@ -139,7 +139,9 @@ export default function Settings() {
 
           <div className="bg-card rounded-2xl border border-border overflow-hidden">
             <button
-              onClick={handleLogout}
+              onClick={() => {
+                void handleLogout();
+              }}
               className="w-full px-6 py-4 flex items-center gap-3 hover:bg-destructive/10 transition-colors text-destructive"
             >
               <LogOut className="w-5 h-5" />

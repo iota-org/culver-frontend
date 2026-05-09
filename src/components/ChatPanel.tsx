@@ -1,4 +1,5 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useMemo } from 'react';
+import { useNavigate } from 'react-router';
 import {
   Phone,
   Video,
@@ -15,16 +16,25 @@ import {
 } from 'lucide-react';
 import { useConversations } from '../contexts/ConversationsContext';
 import { format } from 'date-fns';
+import { useSocket } from '../contexts/SocketContext';
 
 type ChatPanelProps = {
   toggleContactInfo: () => void;
 };
 
 export default function ChatPanel({ toggleContactInfo }: ChatPanelProps) {
-  const { selectedConversation, messages, sendMessage, sendVoiceMessage } =
-    useConversations();
+  const navigate = useNavigate();
+  const { socket } = useSocket();
+  const {
+    selectedConversation,
+    messages,
+    sendMessage,
+    sendVoiceMessage,
+    setSelectedConversation,
+  } = useConversations();
   const [inputValue, setInputValue] = useState('');
-  const [isTyping] = useState(false);
+  const typingTimeoutRef = useRef<number | null>(null);
+  const [typingUsers, setTypingUsers] = useState<Record<string, string>>({});
   const [chatMode, setChatMode] = useState<'chat' | 'voice'>('chat');
   const [recordingState, setRecordingState] = useState<
     null | 'recording' | 'paused'
@@ -52,13 +62,42 @@ export default function ChatPanel({ toggleContactInfo }: ChatPanelProps) {
     {},
   );
 
-  const conversationMessages = selectedConversation
-    ? messages[selectedConversation.id] || []
-    : [];
+  const conversationMessages = useMemo(
+    () => (selectedConversation ? messages[selectedConversation.id] || [] : []),
+    [selectedConversation, messages],
+  );
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [conversationMessages]);
+
+  useEffect(() => {
+    if (!socket || !selectedConversation) return;
+
+    socket.emit(
+      'conversation:join',
+      selectedConversation.id,
+      (err?: string) => {
+        if (err) {
+          console.error('Failed to join conversation:', err);
+          return;
+        }
+        console.log('Joined conversation room:', selectedConversation.id);
+      },
+    );
+
+    return () => {
+      socket.emit(
+        'conversation:leave',
+        selectedConversation.id,
+        (err?: string) => {
+          if (err) {
+            console.error('Failed to leave conversation:', err);
+          }
+        },
+      );
+    };
+  }, [socket, selectedConversation]);
 
   const stopRecordingTimer = () => {
     if (recordingTickRef.current !== null) {
@@ -276,6 +315,25 @@ export default function ChatPanel({ toggleContactInfo }: ChatPanelProps) {
     setErrorMessage(null);
   };
 
+  const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setInputValue(e.target.value);
+
+    if (!socket || !selectedConversation) return;
+
+    // Emit typing:start
+    socket.emit('typing:start', selectedConversation.id);
+
+    // Clear existing timeout
+    if (typingTimeoutRef.current) {
+      window.clearTimeout(typingTimeoutRef.current);
+    }
+
+    // Emit typing:stop if no input
+    typingTimeoutRef.current = window.setTimeout(() => {
+      socket.emit('typing:stop', selectedConversation.id);
+    }, 3000);
+  };
+
   const handleFormSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (chatMode === 'chat') {
@@ -286,10 +344,43 @@ export default function ChatPanel({ toggleContactInfo }: ChatPanelProps) {
     handleSendVoice();
   };
 
+  const chatButtonEvents = (e: React.KeyboardEvent) => {
+    console.log(
+      'Key pressed:',
+      e.key,
+      'Shift:',
+      e.shiftKey,
+      'Chat mode:',
+      chatMode,
+    );
+    if (e.key === 'Escape' && chatMode === 'voice') {
+      discardVoiceRecording();
+    }
+    if (e.key === 'Enter' && chatMode === 'voice') {
+      handleSendVoice();
+    }
+    if (e.key === 'Enter' && chatMode === 'chat' && !e.shiftKey) {
+      e.preventDefault();
+      handleSendText();
+    }
+    if (e.key === 'Enter' && chatMode === 'chat' && e.shiftKey) {
+      e.preventDefault();
+      setInputValue((prev) => prev + '\n');
+    }
+    if (e.key === 'Escape' && chatMode === 'chat') {
+      setInputValue('');
+      setSelectedConversation(null);
+      navigate(`/`);
+    }
+  };
+
   useEffect(() => {
     return () => {
       stopRecordingTimer();
       releaseMicrophone();
+      if (typingTimeoutRef.current) {
+        window.clearTimeout(typingTimeoutRef.current);
+      }
     };
   }, []);
 
@@ -311,8 +402,37 @@ export default function ChatPanel({ toggleContactInfo }: ChatPanelProps) {
 
   useEffect(() => {
     pauseAllVoiceMessages();
-    setActiveVoiceMessageId(null);
+    const resetActiveVoiceMessageId = window.setTimeout(() => {
+      setActiveVoiceMessageId(null);
+    }, 0);
+
+    return () => window.clearTimeout(resetActiveVoiceMessageId);
   }, [selectedConversation?.id]);
+  useEffect(() => {
+    if (!socket) return;
+
+    socket.on(
+      'typing:indicator',
+      ({ userId, name, isTyping, conversationId }) => {
+        // Only show indicator for the currently open conversation
+        if (conversationId !== selectedConversation?.id) return;
+
+        setTypingUsers((prev) => {
+          if (isTyping) {
+            return { ...prev, [userId]: name };
+          } else {
+            const updated = { ...prev };
+            delete updated[userId];
+            return updated;
+          }
+        });
+      },
+    );
+
+    return () => {
+      socket.off('typing:indicator');
+    };
+  }, [socket, selectedConversation?.id]);
 
   if (!selectedConversation) {
     return (
@@ -536,22 +656,29 @@ export default function ChatPanel({ toggleContactInfo }: ChatPanelProps) {
             );
           })
         )}
-        {isTyping && (
+        {Object.keys(typingUsers).length > 0 && (
           <div className="flex justify-start">
             <div className="bg-message-received rounded-2xl px-4 py-3">
-              <div className="flex gap-1">
-                <div
-                  className="w-2 h-2 bg-muted-foreground rounded-full animate-bounce"
-                  style={{ animationDelay: '0ms' }}
-                />
-                <div
-                  className="w-2 h-2 bg-muted-foreground rounded-full animate-bounce"
-                  style={{ animationDelay: '150ms' }}
-                />
-                <div
-                  className="w-2 h-2 bg-muted-foreground rounded-full animate-bounce"
-                  style={{ animationDelay: '300ms' }}
-                />
+              <div className="flex items-center gap-2">
+                <div className="flex gap-1">
+                  <div
+                    className="w-2 h-2 bg-muted-foreground rounded-full animate-bounce"
+                    style={{ animationDelay: '0ms' }}
+                  />
+                  <div
+                    className="w-2 h-2 bg-muted-foreground rounded-full animate-bounce"
+                    style={{ animationDelay: '150ms' }}
+                  />
+                  <div
+                    className="w-2 h-2 bg-muted-foreground rounded-full animate-bounce"
+                    style={{ animationDelay: '300ms' }}
+                  />
+                </div>
+                <span className="text-xs text-muted-foreground">
+                  {Object.values(typingUsers).join(', ')}
+                  {Object.keys(typingUsers).length === 1 ? ' is' : ' are'}{' '}
+                  typing...
+                </span>
               </div>
             </div>
           </div>
@@ -560,7 +687,11 @@ export default function ChatPanel({ toggleContactInfo }: ChatPanelProps) {
       </div>
 
       <div className="border-t border-border p-4 bg-card">
-        <form onSubmit={handleFormSubmit} className="flex items-center gap-2">
+        <form
+          onSubmit={handleFormSubmit}
+          className="flex items-center gap-2"
+          onKeyDown={(e) => chatButtonEvents(e)}
+        >
           {chatMode === 'chat' ? (
             <>
               <button
@@ -573,7 +704,8 @@ export default function ChatPanel({ toggleContactInfo }: ChatPanelProps) {
                 <input
                   type="text"
                   value={inputValue}
-                  onChange={(e) => setInputValue(e.target.value)}
+                  onChange={(e) => handleInputChange(e)}
+                  // onKeyDown={(e) => chatButtonEvents(e)}
                   placeholder="Type a message..."
                   className="w-full px-4 py-2 bg-input-background border border-input rounded-xl focus:outline-none focus:ring-2 focus:ring-ring pr-10"
                 />

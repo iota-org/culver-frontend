@@ -3,7 +3,6 @@ import {
   Phone,
   Video,
   Bell,
-  BellOff,
   Ban,
   FileText,
   Image as ImageIcon,
@@ -75,7 +74,7 @@ export default function ContactInfo({
       </button>
 
       <div className="p-4 border-b border-border">
-        <h4 className="mb-3">About</h4>
+        <h4 className="mb-3">Bio</h4>
         <p className="text-sm text-muted-foreground">
           Hey there! I am using Culver.
         </p>

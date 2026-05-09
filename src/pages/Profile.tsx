@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { ArrowLeft, Camera, User, AtSign, FileText } from 'lucide-react';
 import { useNavigate } from 'react-router';
-import { useAuth } from '../contexts/AuthContext';
+import { useAuth } from '../contexts/useAuth';
 
 export default function Profile() {
   const navigate = useNavigate();
@@ -9,17 +9,17 @@ export default function Profile() {
   const [isEditing, setIsEditing] = useState(false);
   const [name, setName] = useState(user?.name || '');
   const [username, setUsername] = useState(user?.username || '');
-  const [about, setAbout] = useState(user?.about || '');
+  const [bio, setBio] = useState(user?.bio || '');
 
-  const handleSave = () => {
-    updateProfile({ name, username, about });
+  const handleSave = async () => {
+    await updateProfile({ name, username, bio });
     setIsEditing(false);
   };
 
   const handleCancel = () => {
     setName(user?.name || '');
     setUsername(user?.username || '');
-    setAbout(user?.about || '');
+    setBio(user?.bio || '');
     setIsEditing(false);
   };
 
@@ -52,7 +52,9 @@ export default function Profile() {
                 Cancel
               </button>
               <button
-                onClick={handleSave}
+                onClick={() => {
+                  void handleSave();
+                }}
                 className="px-4 py-2 bg-accent text-accent-foreground rounded-xl hover:opacity-90 transition-opacity"
               >
                 Save
@@ -136,24 +138,24 @@ export default function Profile() {
               <div>
                 <label className="flex items-center gap-2 mb-2 text-muted-foreground">
                   <FileText className="w-4 h-4" />
-                  About
+                  bio
                 </label>
                 {isEditing ? (
                   <>
                     <textarea
-                      value={about}
-                      onChange={(e) => setAbout(e.target.value)}
-                      placeholder="Tell people about yourself..."
+                      value={bio}
+                      onChange={(e) => setBio(e.target.value)}
+                      placeholder="Tell people bio yourself..."
                       rows={3}
                       maxLength={150}
                       className="w-full px-4 py-3 bg-input-background border border-input rounded-xl focus:outline-none focus:ring-2 focus:ring-ring resize-none"
                     />
                     <p className="text-sm text-muted-foreground mt-2">
-                      {about.length}/150 characters
+                      {bio.length}/150 characters
                     </p>
                   </>
                 ) : (
-                  <p className="px-4 py-3">{about || 'Not set'}</p>
+                  <p className="px-4 py-3">{bio || 'Not set'}</p>
                 )}
               </div>
 

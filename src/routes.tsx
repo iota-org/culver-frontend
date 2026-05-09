@@ -1,20 +1,14 @@
 import { createBrowserRouter, Navigate } from 'react-router';
 import Login from './pages/Login';
+import SetupProfile from './pages/SetupProfile';
 import MainChat from './pages/Home';
 import Settings from './pages/Settings';
 import Profile from './pages/Profile';
-import ContactDetails from './pages/ContactDetails';
-import { useAuth } from './contexts/AuthContext';
-
-function ProtectedRoute({ children }: { children: React.ReactNode }) {
-  const { isAuthenticated } = useAuth();
-  return isAuthenticated ? <>{children}</> : <Navigate to="/login" replace />;
-}
-
-function PublicRoute({ children }: { children: React.ReactNode }) {
-  const { isAuthenticated } = useAuth();
-  return !isAuthenticated ? <>{children}</> : <Navigate to="/" replace />;
-}
+import {
+  ProtectedRoute,
+  PublicRoute,
+  SignupRoute,
+} from './components/RouteGuards';
 
 export const router = createBrowserRouter([
   {
@@ -23,6 +17,14 @@ export const router = createBrowserRouter([
       <PublicRoute>
         <Login />
       </PublicRoute>
+    ),
+  },
+  {
+    path: '/signup',
+    element: (
+      <SignupRoute>
+        <SetupProfile />
+      </SignupRoute>
     ),
   },
   {

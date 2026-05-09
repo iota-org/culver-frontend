@@ -22,7 +22,6 @@ interface SidebarProps {
 export default function Sidebar({ resetContactView, activeTab }: SidebarProps) {
   const { theme } = useTheme();
   const logo = theme === 'light' ? logoDark : logoLight;
-  console.log(theme);
   const [searchQuery, setSearchQuery] = useState('');
   const { conversations, selectConversation, selectedConversation } =
     useConversations();
