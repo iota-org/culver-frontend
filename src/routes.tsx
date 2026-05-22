@@ -8,7 +8,7 @@ import {
   ProtectedRoute,
   PublicRoute,
   SignupRoute,
-} from './components/RouteGuards';
+} from './components/layout/RouteGuards';
 
 export const router = createBrowserRouter([
   {
@@ -29,14 +29,6 @@ export const router = createBrowserRouter([
   },
   {
     path: '/',
-    element: (
-      <ProtectedRoute>
-        <MainChat />
-      </ProtectedRoute>
-    ),
-  },
-  {
-    path: '/chat/:conversationId',
     element: (
       <ProtectedRoute>
         <MainChat />

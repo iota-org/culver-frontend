@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router';
-import { useAuth } from '../contexts/useAuth';
+import { useAuth } from '../contexts/AuthContext';
 import logoIcon from '../assets/culver/default-monochrome.svg';
 
 export default function SetupProfile() {

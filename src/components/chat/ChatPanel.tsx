@@ -1,5 +1,4 @@
-import { useState, useRef, useEffect, useMemo } from 'react';
-import { useNavigate } from 'react-router';
+import { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import {
   Phone,
   Video,
@@ -9,32 +8,53 @@ import {
   Mic,
   Send,
   Check,
-  CheckCheck,
   Pause,
   Trash,
   Play,
+  ChevronUp,
+  Loader2,
 } from 'lucide-react';
-import { useConversations } from '../contexts/ConversationsContext';
+import { useConversations } from '../../contexts/ConversationsContext';
 import { format } from 'date-fns';
-import { useSocket } from '../contexts/SocketContext';
+import { useAuth } from '../../contexts/AuthContext';
+import { useMediaUpload } from '../../hooks/useMediaUpload';
+import { mimeToMessageType } from '../../lib/utils';
+import AttachmentPreviewStrip from './AttachmentPreviewStrip';
+import MessageAttachment from './MessageAttachment';
+import { createMessage } from '../../services/conversationsService';
 
 type ChatPanelProps = {
   toggleContactInfo: () => void;
 };
 
 export default function ChatPanel({ toggleContactInfo }: ChatPanelProps) {
-  const navigate = useNavigate();
-  const { socket } = useSocket();
+  const { user } = useAuth();
   const {
     selectedConversation,
     messages,
     sendMessage,
-    sendVoiceMessage,
+    markAsRead,
     setSelectedConversation,
+    typingUsers,
+    emitTypingStart,
+    emitTypingStop,
+    isLoadingMessages,
+    hasMoreMessages,
+    loadMoreMessages,
   } = useConversations();
+
+  const {
+    pending,
+    hasFiles,
+    isUploading,
+    addFiles,
+    removeFile,
+    clearAll,
+    uploadFile,
+  } = useMediaUpload();
+
   const [inputValue, setInputValue] = useState('');
   const typingTimeoutRef = useRef<number | null>(null);
-  const [typingUsers, setTypingUsers] = useState<Record<string, string>>({});
   const [chatMode, setChatMode] = useState<'chat' | 'voice'>('chat');
   const [recordingState, setRecordingState] = useState<
     null | 'recording' | 'paused'
@@ -45,6 +65,8 @@ export default function ChatPanel({ toggleContactInfo }: ChatPanelProps) {
   const [recordingTimeSeconds, setRecordingTimeSeconds] = useState(0);
   const [recordedAudioUrl, setRecordedAudioUrl] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [isSendingMedia, setIsSendingMedia] = useState(false);
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
@@ -52,6 +74,8 @@ export default function ChatPanel({ toggleContactInfo }: ChatPanelProps) {
   const recordingTickRef = useRef<number | null>(null);
   const previewAudioRef = useRef<HTMLAudioElement | null>(null);
   const voiceAudioRefs = useRef<Record<string, HTMLAudioElement | null>>({});
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
   const [activeVoiceMessageId, setActiveVoiceMessageId] = useState<
     string | null
   >(null);
@@ -63,41 +87,30 @@ export default function ChatPanel({ toggleContactInfo }: ChatPanelProps) {
   );
 
   const conversationMessages = useMemo(
-    () => (selectedConversation ? messages[selectedConversation.id] || [] : []),
+    () =>
+      selectedConversation ? (messages[selectedConversation.id] ?? []) : [],
     [selectedConversation, messages],
   );
+
+  const latestMessage = conversationMessages[conversationMessages.length - 1];
+
+  const currentTypingUsers = useMemo(() => {
+    if (!selectedConversation) return [];
+    return typingUsers[selectedConversation.id] ?? [];
+  }, [typingUsers, selectedConversation]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [conversationMessages]);
 
   useEffect(() => {
-    if (!socket || !selectedConversation) return;
+    if (!selectedConversation || !latestMessage) return;
+    if (latestMessage.sender_id !== user?.id) {
+      markAsRead(selectedConversation.id, latestMessage.id);
+    }
+  }, [latestMessage, markAsRead, selectedConversation, user?.id]);
 
-    socket.emit(
-      'conversation:join',
-      selectedConversation.id,
-      (err?: string) => {
-        if (err) {
-          console.error('Failed to join conversation:', err);
-          return;
-        }
-        console.log('Joined conversation room:', selectedConversation.id);
-      },
-    );
-
-    return () => {
-      socket.emit(
-        'conversation:leave',
-        selectedConversation.id,
-        (err?: string) => {
-          if (err) {
-            console.error('Failed to leave conversation:', err);
-          }
-        },
-      );
-    };
-  }, [socket, selectedConversation]);
+  // Recording helper functions
 
   const stopRecordingTimer = () => {
     if (recordingTickRef.current !== null) {
@@ -126,34 +139,24 @@ export default function ChatPanel({ toggleContactInfo }: ChatPanelProps) {
 
   const pauseAllVoiceMessages = (exceptMessageId?: string) => {
     Object.entries(voiceAudioRefs.current).forEach(([messageId, audio]) => {
-      if (!audio) return;
-      if (exceptMessageId && messageId === exceptMessageId) return;
-      if (!audio.paused) {
-        audio.pause();
-      }
+      if (!audio || (exceptMessageId && messageId === exceptMessageId)) return;
+      if (!audio.paused) audio.pause();
     });
   };
 
   const toggleVoiceMessagePlayback = async (messageId: string) => {
     const audio = voiceAudioRefs.current[messageId];
     if (!audio) return;
-
     if (!audio.paused) {
       audio.pause();
       setActiveVoiceMessageId(null);
       return;
     }
-
     pauseAllVoiceMessages(messageId);
-
     if (audio.duration && audio.currentTime >= audio.duration - 0.05) {
       audio.currentTime = 0;
-      setVoiceProgress((prev) => ({
-        ...prev,
-        [messageId]: 0,
-      }));
+      setVoiceProgress((prev) => ({ ...prev, [messageId]: 0 }));
     }
-
     try {
       await audio.play();
       setActiveVoiceMessageId(messageId);
@@ -165,67 +168,163 @@ export default function ChatPanel({ toggleContactInfo }: ChatPanelProps) {
   const handleVoiceSeek = (messageId: string, value: number) => {
     const audio = voiceAudioRefs.current[messageId];
     if (!audio) return;
-
     const clamped = Math.max(0, Math.min(100, value));
     const duration = audio.duration || voiceDurations[messageId] || 0;
     audio.currentTime = duration * (clamped / 100);
-
-    setVoiceProgress((prev) => ({
-      ...prev,
-      [messageId]: clamped,
-    }));
+    setVoiceProgress((prev) => ({ ...prev, [messageId]: clamped }));
   };
+
+  // File picker
+
+  const handleFilePickerClick = () => {
+    fileInputRef.current?.click();
+  };
+
+  const handleFileInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files.length > 0) {
+      addFiles(e.target.files);
+    }
+    // Reset so same file can be picked again
+    e.target.value = '';
+  };
+
+  // Drag-and-drop onto the messages area
+  const handleDrop = useCallback(
+    (e: React.DragEvent<HTMLDivElement>) => {
+      e.preventDefault();
+      if (e.dataTransfer.files.length > 0) {
+        addFiles(e.dataTransfer.files);
+      }
+    },
+    [addFiles],
+  );
+
+  const handleDragOver = (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+  };
+
+  // Send text
 
   const handleSendText = () => {
     if (!inputValue.trim() || !selectedConversation) return;
-
-    sendMessage(selectedConversation.id, inputValue);
+    sendMessage(selectedConversation.id, inputValue.trim(), 'text');
     setInputValue('');
+    if (typingTimeoutRef.current) window.clearTimeout(typingTimeoutRef.current);
+    emitTypingStop(selectedConversation.id);
   };
+
+  // Send media attachments
+  //
+  // steps
+  // 1. Create a placeholder message via socket (message_type = first file's type)
+  //    to get a real message_id from the backend.
+  // 2. Upload all files to POST /api/v1/media/upload using that message_id.
+  // 3. The backend links the attachment rows to the message_id automatically.
+  // 4. Update the optimistic message in-place (socket ack handles this).
+  //
+  // If the user also typed text, send it as a separate text message after.
+
+  const handleSendMedia = async () => {
+    if (!selectedConversation || pending.length === 0) return;
+    setIsSendingMedia(true);
+    setErrorMessage(null);
+
+    try {
+      // We need a real message_id before uploading.
+      // Send a placeholder message via the REST API (not socket) to get the id.
+      const firstFile = pending[0];
+      const firstType = mimeToMessageType(firstFile.file.type);
+
+      // POST /conversations/:id/messages to create the message row
+      const placeholderMessage = await createMessage(
+        selectedConversation.id,
+        inputValue.trim() || firstFile.file.name,
+        firstType,
+      );
+
+      const messageId = placeholderMessage.id;
+
+      // Upload all pending files against that message_id
+      const uploadResults = await Promise.all(
+        pending.map((p) => uploadFile(p.localId, messageId)),
+      );
+
+      const successful = uploadResults.filter(Boolean);
+      if (successful.length === 0) {
+        throw new Error('All uploads failed. Please try again.');
+      }
+
+      // The message already exists on the server — fire the socket event
+      // so the rest of the conversation UI updates (optimistic + sidebar preview).
+      // Use the file_url of the first attachment as ciphertext so existing
+      // voice/image renderers can use it directly.
+      sendMessage(selectedConversation.id, successful[0]!.file_url, firstType);
+
+      // If user also typed text, send as a separate message
+      if (inputValue.trim()) {
+        sendMessage(selectedConversation.id, inputValue.trim(), 'text');
+        setInputValue('');
+      }
+
+      clearAll();
+    } catch (err) {
+      setErrorMessage(
+        err instanceof Error ? err.message : 'Failed to send media',
+      );
+    } finally {
+      setIsSendingMedia(false);
+    }
+  };
+
+  // Send voice
+
+  const handleSendVoice = () => {
+    if (!selectedConversation || !recordedAudioUrl) return;
+    sendMessage(selectedConversation.id, recordedAudioUrl, 'audio');
+    mediaRecorderRef.current = null;
+    recordedChunksRef.current = [];
+    setRecordedAudioUrl(null);
+    setRecordingTimeSeconds(0);
+    setRecordingState(null);
+    setRecordingPreview('inactive');
+    setChatMode('chat');
+    setErrorMessage(null);
+  };
+
+  // Recording flow
 
   const startVoiceRecording = async () => {
     if (!selectedConversation) return;
-
     if (!navigator.mediaDevices || !window.MediaRecorder) {
       setErrorMessage('Voice recording is not supported in this browser.');
       return;
     }
-
     try {
-      if (recordedAudioUrl) {
-        URL.revokeObjectURL(recordedAudioUrl);
-      }
+      if (recordedAudioUrl) URL.revokeObjectURL(recordedAudioUrl);
       setRecordedAudioUrl(null);
       setErrorMessage(null);
       setRecordingTimeSeconds(0);
       setRecordingPreview('inactive');
       recordedChunksRef.current = [];
 
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: true,
-      });
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       const mediaRecorder = new MediaRecorder(stream);
       mediaStreamRef.current = stream;
       mediaRecorderRef.current = mediaRecorder;
 
       mediaRecorder.ondataavailable = (event: BlobEvent) => {
-        if (event.data.size > 0) {
-          recordedChunksRef.current.push(event.data);
-        }
+        if (event.data.size > 0) recordedChunksRef.current.push(event.data);
       };
 
       mediaRecorder.onstop = () => {
         const audioBlob = new Blob(recordedChunksRef.current, {
           type: 'audio/webm',
         });
-
         if (audioBlob.size === 0) {
           setErrorMessage('No audio was captured. Please try again.');
           return;
         }
-
-        const audioUrl = URL.createObjectURL(audioBlob);
-        setRecordedAudioUrl(audioUrl);
+        setRecordedAudioUrl(URL.createObjectURL(audioBlob));
         setRecordingState('paused');
         setRecordingPreview('inactive');
       };
@@ -248,25 +347,18 @@ export default function ChatPanel({ toggleContactInfo }: ChatPanelProps) {
 
   const resumeVoiceRecording = () => {
     const recorder = mediaRecorderRef.current;
-    if (!recorder) return;
-
-    if (recorder.state === 'paused') {
-      recorder.resume();
-      setRecordingState('recording');
-      stopRecordingTimer();
-      recordingTickRef.current = window.setInterval(() => {
-        setRecordingTimeSeconds((prev) => prev + 1);
-      }, 1000);
-    }
+    if (!recorder || recorder.state !== 'paused') return;
+    recorder.resume();
+    setRecordingState('recording');
+    stopRecordingTimer();
+    recordingTickRef.current = window.setInterval(() => {
+      setRecordingTimeSeconds((prev) => prev + 1);
+    }, 1000);
   };
 
   const stopVoiceRecording = () => {
     const recorder = mediaRecorderRef.current;
-    if (!recorder) return;
-
-    if (recorder.state !== 'inactive') {
-      recorder.stop();
-    }
+    if (recorder && recorder.state !== 'inactive') recorder.stop();
     setRecordingState('paused');
     stopRecordingTimer();
     releaseMicrophone();
@@ -274,18 +366,10 @@ export default function ChatPanel({ toggleContactInfo }: ChatPanelProps) {
 
   const discardVoiceRecording = () => {
     stopRecordingTimer();
-
     const recorder = mediaRecorderRef.current;
-    if (recorder && recorder.state !== 'inactive') {
-      recorder.stop();
-    }
-
+    if (recorder && recorder.state !== 'inactive') recorder.stop();
     releaseMicrophone();
-
-    if (recordedAudioUrl) {
-      URL.revokeObjectURL(recordedAudioUrl);
-    }
-
+    if (recordedAudioUrl) URL.revokeObjectURL(recordedAudioUrl);
     mediaRecorderRef.current = null;
     recordedChunksRef.current = [];
     setRecordedAudioUrl(null);
@@ -296,143 +380,81 @@ export default function ChatPanel({ toggleContactInfo }: ChatPanelProps) {
     setErrorMessage(null);
   };
 
-  const handleSendVoice = () => {
-    if (!selectedConversation || !recordedAudioUrl) return;
-
-    sendVoiceMessage(
-      selectedConversation.id,
-      recordedAudioUrl,
-      recordingTimeSeconds,
-    );
-
-    mediaRecorderRef.current = null;
-    recordedChunksRef.current = [];
-    setRecordedAudioUrl(null);
-    setRecordingTimeSeconds(0);
-    setRecordingState(null);
-    setRecordingPreview('inactive');
-    setChatMode('chat');
-    setErrorMessage(null);
-  };
+  // Input & keyboard
 
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     setInputValue(e.target.value);
-
-    if (!socket || !selectedConversation) return;
-
-    // Emit typing:start
-    socket.emit('typing:start', selectedConversation.id);
-
-    // Clear existing timeout
-    if (typingTimeoutRef.current) {
-      window.clearTimeout(typingTimeoutRef.current);
-    }
-
-    // Emit typing:stop if no input
+    if (!selectedConversation) return;
+    emitTypingStart(selectedConversation.id);
+    if (typingTimeoutRef.current) window.clearTimeout(typingTimeoutRef.current);
     typingTimeoutRef.current = window.setTimeout(() => {
-      socket.emit('typing:stop', selectedConversation.id);
+      emitTypingStop(selectedConversation.id);
     }, 3000);
   };
 
   const handleFormSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (chatMode === 'chat') {
+    if (hasFiles) {
+      void handleSendMedia();
+    } else if (chatMode === 'chat') {
       handleSendText();
-      return;
+    } else {
+      handleSendVoice();
     }
-
-    handleSendVoice();
   };
 
   const chatButtonEvents = (e: React.KeyboardEvent) => {
-    console.log(
-      'Key pressed:',
-      e.key,
-      'Shift:',
-      e.shiftKey,
-      'Chat mode:',
-      chatMode,
-    );
-    if (e.key === 'Escape' && chatMode === 'voice') {
-      discardVoiceRecording();
-    }
-    if (e.key === 'Enter' && chatMode === 'voice') {
-      handleSendVoice();
-    }
+    if (e.key === 'Escape' && chatMode === 'voice') discardVoiceRecording();
+    if (e.key === 'Enter' && chatMode === 'voice') handleSendVoice();
     if (e.key === 'Enter' && chatMode === 'chat' && !e.shiftKey) {
       e.preventDefault();
-      handleSendText();
+      if (hasFiles) void handleSendMedia();
+      else handleSendText();
     }
     if (e.key === 'Enter' && chatMode === 'chat' && e.shiftKey) {
       e.preventDefault();
       setInputValue((prev) => prev + '\n');
     }
-    if (e.key === 'Escape' && chatMode === 'chat') {
+    if (e.key === 'Escape' && chatMode === 'chat' && !hasFiles) {
       setInputValue('');
       setSelectedConversation(null);
-      navigate(`/`);
     }
   };
+
+  // Cleanup
 
   useEffect(() => {
     return () => {
       stopRecordingTimer();
       releaseMicrophone();
-      if (typingTimeoutRef.current) {
+      if (typingTimeoutRef.current)
         window.clearTimeout(typingTimeoutRef.current);
-      }
     };
   }, []);
 
   useEffect(() => {
     if (recordingPreview === 'active') {
-      previewAudioRef.current?.play().catch(() => {
-        setRecordingPreview('inactive');
-      });
+      previewAudioRef.current
+        ?.play()
+        .catch(() => setRecordingPreview('inactive'));
     } else {
       previewAudioRef.current?.pause();
     }
   }, [recordingPreview]);
 
   useEffect(() => {
-    return () => {
-      pauseAllVoiceMessages();
-    };
-  }, []);
-
-  useEffect(() => {
     pauseAllVoiceMessages();
-    const resetActiveVoiceMessageId = window.setTimeout(() => {
-      setActiveVoiceMessageId(null);
-    }, 0);
-
-    return () => window.clearTimeout(resetActiveVoiceMessageId);
+    const t = window.setTimeout(() => setActiveVoiceMessageId(null), 0);
+    return () => window.clearTimeout(t);
   }, [selectedConversation?.id]);
-  useEffect(() => {
-    if (!socket) return;
 
-    socket.on(
-      'typing:indicator',
-      ({ userId, name, isTyping, conversationId }) => {
-        // Only show indicator for the currently open conversation
-        if (conversationId !== selectedConversation?.id) return;
+  // Derived send-button state
 
-        setTypingUsers((prev) => {
-          if (isTyping) {
-            return { ...prev, [userId]: name };
-          } else {
-            const updated = { ...prev };
-            delete updated[userId];
-            return updated;
-          }
-        });
-      },
-    );
-
-    return () => {
-      socket.off('typing:indicator');
-    };
-  }, [socket, selectedConversation?.id]);
+  const canSend = hasFiles
+    ? !isUploading && !isSendingMedia
+    : chatMode === 'chat'
+      ? !!inputValue.trim()
+      : !!recordedAudioUrl;
 
   if (!selectedConversation) {
     return (
@@ -462,35 +484,50 @@ export default function ChatPanel({ toggleContactInfo }: ChatPanelProps) {
     );
   }
 
+  const displayName = selectedConversation.name ?? 'Unknown';
+
+  // Render
+
   return (
     <div className="flex-1 flex flex-col bg-background">
+      {/* Hidden file input */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        multiple
+        accept="image/jpeg,image/png,image/gif,image/webp,video/mp4,video/webm,audio/webm,audio/mpeg,audio/ogg,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        className="hidden"
+        onChange={handleFileInputChange}
+        aria-label="Attach files"
+      />
+
+      {/* Header */}
       <div className="h-16 border-b border-border px-6 flex items-center justify-between bg-card">
         <div
           className="flex items-center gap-3 p-2 pr-24 hover:bg-sidebar-accent rounded-lg cursor-pointer transition-colors"
           onClick={toggleContactInfo}
         >
           <div className="relative">
-            <div className="w-10 h-10 rounded-full bg-muted overflow-hidden">
-              {selectedConversation.avatar ? (
+            <div className="w-10 h-10 rounded-full bg-muted overflow-hidden flex items-center justify-center">
+              {selectedConversation.avatar_url ? (
                 <img
-                  src={selectedConversation.avatar}
-                  alt={selectedConversation.name}
+                  src={selectedConversation.avatar_url}
+                  alt={displayName}
                   className="w-full h-full object-cover"
                 />
               ) : (
-                <div className="w-full h-full flex items-center justify-center text-foreground">
-                  {selectedConversation.name.charAt(0)}
-                </div>
+                <span className="text-foreground font-medium">
+                  {displayName.charAt(0).toUpperCase()}
+                </span>
               )}
             </div>
-            {selectedConversation.isOnline && (
-              <div className="absolute bottom-0 right-0 w-3 h-3 bg-green-500 border-2 border-card rounded-full" />
-            )}
           </div>
           <div>
-            <h3 className="font-medium">{selectedConversation.name}</h3>
+            <h3 className="font-medium w-auto">{displayName}</h3>
             <p className="text-xs text-muted-foreground">
-              {selectedConversation.isOnline ? 'Online' : 'Offline'}
+              {selectedConversation.type === 'group'
+                ? 'Group conversation'
+                : 'Direct message'}
             </p>
           </div>
         </div>
@@ -508,26 +545,44 @@ export default function ChatPanel({ toggleContactInfo }: ChatPanelProps) {
         </div>
       </div>
 
-      <div className="max-w-full flex-1 overflow-y-auto p-6 space-y-4">
-        {conversationMessages.length === 0 ? (
+      {/* Messages */}
+      <div
+        className="max-w-full flex-1 p-6 space-y-4 [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-thumb]:bg-gray-400 overflow-y-auto [&::-webkit-scrollbar-thumb]:rounded-[3px]"
+        onDrop={handleDrop}
+        onDragOver={handleDragOver}
+      >
+        {hasMoreMessages(selectedConversation.id) && (
+          <div className="flex justify-center">
+            <button
+              onClick={() => void loadMoreMessages(selectedConversation.id)}
+              disabled={isLoadingMessages}
+              className="flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50"
+            >
+              <ChevronUp className="w-4 h-4" />
+              {isLoadingMessages ? 'Loading...' : 'Load older messages'}
+            </button>
+          </div>
+        )}
+
+        {conversationMessages.length === 0 && !isLoadingMessages ? (
           <div className="text-center text-muted-foreground py-12">
             <p>No messages yet. Start the conversation!</p>
           </div>
         ) : (
           conversationMessages.map((msg, idx) => {
-            const isOwn = msg.sender_id === '1';
+            const isOwn = msg.sender_id === user?.id;
             const showTimestamp =
               idx === 0 ||
               (conversationMessages[idx - 1] &&
-                new Date(msg.timestamp).getTime() -
-                  new Date(conversationMessages[idx - 1].timestamp).getTime() >
-                  300000);
+                msg.sent_at.getTime() -
+                  conversationMessages[idx - 1].sent_at.getTime() >
+                  300_000);
 
             return (
               <div key={msg.id}>
                 {showTimestamp && (
                   <div className="text-center text-xs text-muted-foreground my-4">
-                    {format(msg.timestamp, 'EEEE, MMM d, h:mm a')}
+                    {format(msg.sent_at, 'EEEE, MMM d, h:mm a')}
                   </div>
                 )}
                 <div
@@ -540,13 +595,14 @@ export default function ChatPanel({ toggleContactInfo }: ChatPanelProps) {
                         : 'bg-message-received text-foreground'
                     }`}
                   >
-                    {msg.type === 'voice' ? (
+                    {/* ── Audio message ───────────────────────────────────── */}
+                    {msg.message_type === 'audio' ? (
                       <div className="min-w-55 flex items-center gap-3">
                         <audio
                           ref={(el) => {
                             voiceAudioRefs.current[msg.id] = el;
                           }}
-                          src={msg.content}
+                          src={msg.ciphertext}
                           preload="metadata"
                           className="hidden"
                           onLoadedMetadata={(e) => {
@@ -562,7 +618,6 @@ export default function ChatPanel({ toggleContactInfo }: ChatPanelProps) {
                             const { currentTime, duration } = e.currentTarget;
                             const progress =
                               duration > 0 ? (currentTime / duration) * 100 : 0;
-
                             setVoiceProgress((prev) => ({
                               ...prev,
                               [msg.id]: progress,
@@ -577,25 +632,19 @@ export default function ChatPanel({ toggleContactInfo }: ChatPanelProps) {
                               [msg.id]: 0,
                             }));
                             const audio = voiceAudioRefs.current[msg.id];
-                            if (audio) {
-                              audio.currentTime = 0;
-                            }
+                            if (audio) audio.currentTime = 0;
                           }}
                         />
-
                         <button
                           type="button"
-                          onClick={() => toggleVoiceMessagePlayback(msg.id)}
+                          onClick={() =>
+                            void toggleVoiceMessagePlayback(msg.id)
+                          }
                           className={`shrink-0 w-9 h-9 rounded-full flex items-center justify-center transition-colors ${
                             isOwn
                               ? 'bg-white/20 hover:bg-white/30'
                               : 'bg-black/10 hover:bg-black/20'
                           }`}
-                          aria-label={
-                            activeVoiceMessageId === msg.id
-                              ? 'Pause voice message'
-                              : 'Play voice message'
-                          }
                         >
                           {activeVoiceMessageId === msg.id ? (
                             <Pause className="w-4 h-4" />
@@ -603,7 +652,6 @@ export default function ChatPanel({ toggleContactInfo }: ChatPanelProps) {
                             <Play className="w-4 h-4" />
                           )}
                         </button>
-
                         <div className="flex-1 flex items-center gap-2">
                           <input
                             type="range"
@@ -614,40 +662,54 @@ export default function ChatPanel({ toggleContactInfo }: ChatPanelProps) {
                               handleVoiceSeek(msg.id, Number(e.target.value))
                             }
                             className="w-full accent-current"
-                            aria-label="Seek voice message"
                           />
                           <span className="text-[11px] tabular-nums opacity-80 min-w-8.5 text-right">
                             {formatDuration(voiceDurations[msg.id] || 0)}
                           </span>
                         </div>
                       </div>
+                    ) : msg.message_type === 'image' ||
+                      msg.message_type === 'video' ||
+                      msg.message_type === 'file' ? (
+                      /* ── Media attachment ─────────────────────────────── */
+                      <MessageAttachment
+                        attachmentId={msg.ciphertext}
+                        mediaType={msg.message_type}
+                        isOwn={isOwn}
+                      />
                     ) : (
+                      /* ── Text message ────────────────────────────────── */
                       <p
-                        className={`whitespace-pre-wrap ${
-                          hasLongToken(msg.content)
-                            ? 'break-all'
-                            : 'wrap-break-word'
-                        }`}
+                        className={`whitespace-pre-wrap ${hasLongToken(msg.ciphertext) ? 'break-all' : 'wrap-break-word'}`}
                       >
-                        {msg.content}
+                        {msg.is_deleted ? (
+                          <span className="italic opacity-60">
+                            This message was deleted
+                          </span>
+                        ) : (
+                          msg.ciphertext
+                        )}
                       </p>
                     )}
+
                     <div
                       className={`flex items-center gap-1 mt-1 text-xs ${isOwn ? 'text-white/70' : 'text-muted-foreground'}`}
                     >
-                      <span>{format(msg.timestamp, 'h:mm a')}</span>
-                      {isOwn && (
-                        <span>
-                          {msg.status === 'sent' && (
-                            <Check className="w-3 h-3" />
-                          )}
-                          {msg.status === 'delivered' && (
-                            <CheckCheck className="w-3 h-3" />
-                          )}
-                          {msg.status === 'read' && (
-                            <CheckCheck className="w-3 h-3 text-blue-800" />
-                          )}
-                        </span>
+                      <span>{format(msg.sent_at, 'h:mm a')}</span>
+                      {isOwn && msg.status === 'sent' && (
+                        <Check className="w-3 h-3" />
+                      )}
+                      {isOwn && msg.status === 'delivered' && (
+                        <div className="relative">
+                          <Check className="w-3 h-3" />
+                          <Check className="w-3 h-3 absolute top-0 -right-1" />
+                        </div>
+                      )}
+                      {isOwn && msg.status === 'read' && (
+                        <div className="relative">
+                          <Check className="w-3 h-3 text-blue-500" />
+                          <Check className="w-3 h-3 text-blue-500 absolute top-0 -right-1" />
+                        </div>
                       )}
                     </div>
                   </div>
@@ -656,28 +718,24 @@ export default function ChatPanel({ toggleContactInfo }: ChatPanelProps) {
             );
           })
         )}
-        {Object.keys(typingUsers).length > 0 && (
+
+        {/* Typing indicator */}
+        {currentTypingUsers.length > 0 && (
           <div className="flex justify-start">
             <div className="bg-message-received rounded-2xl px-4 py-3">
               <div className="flex items-center gap-2">
                 <div className="flex gap-1">
-                  <div
-                    className="w-2 h-2 bg-muted-foreground rounded-full animate-bounce"
-                    style={{ animationDelay: '0ms' }}
-                  />
-                  <div
-                    className="w-2 h-2 bg-muted-foreground rounded-full animate-bounce"
-                    style={{ animationDelay: '150ms' }}
-                  />
-                  <div
-                    className="w-2 h-2 bg-muted-foreground rounded-full animate-bounce"
-                    style={{ animationDelay: '300ms' }}
-                  />
+                  {[0, 150, 300].map((delay) => (
+                    <div
+                      key={delay}
+                      className="w-2 h-2 bg-muted-foreground rounded-full animate-bounce"
+                      style={{ animationDelay: `${delay}ms` }}
+                    />
+                  ))}
                 </div>
                 <span className="text-xs text-muted-foreground">
-                  {Object.values(typingUsers).join(', ')}
-                  {Object.keys(typingUsers).length === 1 ? ' is' : ' are'}{' '}
-                  typing...
+                  {currentTypingUsers.map((u) => u.name).join(', ')}
+                  {currentTypingUsers.length === 1 ? ' is' : ' are'} typing...
                 </span>
               </div>
             </div>
@@ -686,51 +744,75 @@ export default function ChatPanel({ toggleContactInfo }: ChatPanelProps) {
         <div ref={messagesEndRef} />
       </div>
 
+      {/* Attachment preview strip — sits between messages and the input bar */}
+      <AttachmentPreviewStrip pending={pending} onRemove={removeFile} />
+
+      {/* Input bar */}
       <div className="border-t border-border p-4 bg-card">
+        {errorMessage && (
+          <p className="text-xs text-destructive mb-2 text-center">
+            {errorMessage}
+          </p>
+        )}
         <form
           onSubmit={handleFormSubmit}
           className="flex items-center gap-2"
-          onKeyDown={(e) => chatButtonEvents(e)}
+          onKeyDown={chatButtonEvents}
         >
           {chatMode === 'chat' ? (
             <>
+              {/* Paperclip — opens file picker */}
               <button
                 type="button"
-                className="p-2 hover:bg-accent rounded-lg transition-colors"
+                onClick={handleFilePickerClick}
+                disabled={isSendingMedia}
+                className="p-2 hover:bg-accent rounded-lg transition-colors disabled:opacity-50"
+                aria-label="Attach file"
               >
-                <Paperclip className="w-5 h-5 text-muted-foreground" />
+                <Paperclip
+                  className={`w-5 h-5 ${hasFiles ? 'text-sidebar-primary' : 'text-muted-foreground'}`}
+                />
               </button>
+
               <div className="flex-1 relative">
                 <input
                   type="text"
                   value={inputValue}
-                  onChange={(e) => handleInputChange(e)}
-                  // onKeyDown={(e) => chatButtonEvents(e)}
-                  placeholder="Type a message..."
+                  onChange={handleInputChange}
+                  placeholder={
+                    hasFiles ? 'Add a caption… (optional)' : 'Type a message...'
+                  }
                   className="w-full px-4 py-2 bg-input-background border border-input rounded-xl focus:outline-none focus:ring-2 focus:ring-ring pr-10"
                 />
                 <button
                   type="button"
                   className="absolute right-2 top-1/2 -translate-y-1/2 p-1 hover:bg-accent rounded-lg transition-colors"
+                  aria-label="Emoji"
                 >
                   <Smile className="w-5 h-5 text-muted-foreground" />
                 </button>
               </div>
-              <button
-                type="button"
-                onClick={startVoiceRecording}
-                className="p-2 hover:bg-accent rounded-lg transition-colors"
-              >
-                <Mic className="w-5 h-5 text-muted-foreground" />
-              </button>
+
+              {/* Only show mic when there are no pending files */}
+              {!hasFiles && (
+                <button
+                  type="button"
+                  onClick={() => void startVoiceRecording()}
+                  className="p-2 hover:bg-accent rounded-lg transition-colors"
+                  aria-label="Record voice message"
+                >
+                  <Mic className="w-5 h-5 text-muted-foreground" />
+                </button>
+              )}
             </>
           ) : (
+            /* Voice recording UI — unchanged */
             <>
               <button
                 type="button"
                 onClick={discardVoiceRecording}
                 className="p-2 hover:bg-accent rounded-lg transition-colors"
-                aria-label="Discard voice recording"
+                aria-label="Discard recording"
               >
                 <Trash className="w-5 h-5 text-muted-foreground" />
               </button>
@@ -756,11 +838,6 @@ export default function ChatPanel({ toggleContactInfo }: ChatPanelProps) {
                         )
                       }
                       className="p-1 hover:bg-accent rounded-lg transition-colors"
-                      aria-label={
-                        recordingPreview === 'active'
-                          ? 'Pause preview'
-                          : 'Play preview'
-                      }
                     >
                       {recordingPreview === 'active' ? (
                         <Pause className="w-5 h-5 text-foreground" />
@@ -782,7 +859,6 @@ export default function ChatPanel({ toggleContactInfo }: ChatPanelProps) {
                     type="button"
                     onClick={stopVoiceRecording}
                     className="ml-auto p-1 hover:bg-accent rounded-lg transition-colors"
-                    aria-label="Stop recording"
                   >
                     <Pause className="w-5 h-5 text-foreground" />
                   </button>
@@ -791,7 +867,6 @@ export default function ChatPanel({ toggleContactInfo }: ChatPanelProps) {
                     type="button"
                     onClick={resumeVoiceRecording}
                     className="ml-auto p-1 hover:bg-accent rounded-lg transition-colors"
-                    aria-label="Resume recording"
                     disabled={!!recordedAudioUrl}
                   >
                     <Mic
@@ -802,18 +877,20 @@ export default function ChatPanel({ toggleContactInfo }: ChatPanelProps) {
               </div>
             </>
           )}
-          {errorMessage && (
-            <span className="text-xs text-red-500">{errorMessage}</span>
-          )}
+
+          {/* Send button */}
           <button
             type={chatMode === 'chat' ? 'submit' : 'button'}
             onClick={chatMode === 'voice' ? handleSendVoice : undefined}
-            disabled={
-              chatMode === 'chat' ? !inputValue.trim() : !recordedAudioUrl
-            }
-            className="p-2 bg-accent text-accent-foreground rounded-lg hover:opacity-90 transition-opacity disabled:opacity-50"
+            disabled={!canSend}
+            className="p-2 bg-accent text-accent-foreground rounded-lg hover:opacity-90 transition-opacity disabled:opacity-50 relative"
+            aria-label="Send"
           >
-            <Send className="w-5 h-5" />
+            {isSendingMedia || isUploading ? (
+              <Loader2 className="w-5 h-5 animate-spin" />
+            ) : (
+              <Send className="w-5 h-5" />
+            )}
           </button>
         </form>
       </div>

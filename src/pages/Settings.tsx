@@ -9,7 +9,7 @@ import {
 } from 'lucide-react';
 import { useNavigate } from 'react-router';
 import { useTheme } from '../contexts/ThemeContext';
-import { useAuth } from '../contexts/useAuth';
+import { useAuth } from '../contexts/AuthContext';
 
 export default function Settings() {
   const navigate = useNavigate();

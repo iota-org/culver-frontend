@@ -47,6 +47,9 @@ export default function ContactDetails({ onClose }: ContactDetailsProps) {
     navigate('/');
   };
 
+  const isGroup = conversation.type === 'group';
+  const displayName = conversation.name ?? (isGroup ? 'Group' : 'Unknown');
+
   return (
     <div className="min-h-screen bg-background w-full">
       <div className="">
@@ -57,7 +60,7 @@ export default function ContactDetails({ onClose }: ContactDetailsProps) {
           >
             <ArrowLeft className="w-5 h-5" />
           </button>
-          <h1>{conversation.isGroup ? 'Group Info' : 'Contact Info'}</h1>
+          <h1>{isGroup ? 'Group Info' : 'Contact Info'}</h1>
         </div>
 
         <div className="max-w-3xl p-6 space-y-6 mx-auto">
@@ -65,32 +68,27 @@ export default function ContactDetails({ onClose }: ContactDetailsProps) {
           <div className="bg-card rounded-2xl border border-border overflow-hidden">
             <div className="flex flex-col items-center p-8">
               <div className="w-32 h-32 rounded-full bg-muted overflow-hidden mb-4">
-                {conversation.avatar ? (
+                {conversation.avatar_url ? (
                   <img
-                    src={conversation.avatar}
-                    alt={conversation.name}
+                    src={conversation.avatar_url}
+                    alt={displayName}
                     className="w-full h-full object-cover"
                   />
                 ) : (
                   <div className="w-full h-full flex items-center justify-center text-4xl">
-                    {conversation.name.charAt(0)}
+                    {displayName.charAt(0)}
                   </div>
                 )}
               </div>
-              <h2 className="mb-2">{conversation.name}</h2>
-              {conversation.isOnline !== undefined && (
-                <p className="text-sm text-muted-foreground">
-                  {conversation.isOnline ? 'Online' : 'Offline'}
-                </p>
-              )}
-              {conversation.isGroup && (
+              <h2 className="mb-2">{displayName}</h2>
+              {isGroup && (
                 <p className="text-sm text-muted-foreground mt-1">
-                  {conversation.participants.length} participants
+                  Group conversation
                 </p>
               )}
             </div>
 
-            {!conversation.isGroup && (
+            {!isGroup && (
               <div className="border-t border-border divide-y divide-border">
                 <div className="px-6 py-4">
                   <div className="flex items-center gap-3 text-muted-foreground">
@@ -116,7 +114,7 @@ export default function ContactDetails({ onClose }: ContactDetailsProps) {
                     <div>
                       <p className="text-sm">Username</p>
                       <p className="text-foreground">
-                        @{conversation.name.toLowerCase().replace(' ', '')}
+                        @{displayName.toLowerCase().replace(' ', '')}
                       </p>
                     </div>
                   </div>
@@ -178,27 +176,12 @@ export default function ContactDetails({ onClose }: ContactDetailsProps) {
             </div>
           </div>
 
-          {conversation.isGroup && (
+          {isGroup && (
             <div className="bg-card rounded-2xl border border-border overflow-hidden">
               <h3 className="px-6 py-4 border-b border-border">Participants</h3>
-              <div className="divide-y divide-border">
-                {conversation.participants.map((participantId, index) => (
-                  <div
-                    key={participantId}
-                    className="px-6 py-4 flex items-center gap-3"
-                  >
-                    <div className="w-10 h-10 rounded-full bg-muted flex items-center justify-center">
-                      P{index + 1}
-                    </div>
-                    <div className="flex-1">
-                      <p className="font-medium">Participant {index + 1}</p>
-                      <p className="text-sm text-muted-foreground">
-                        @participant{index + 1}
-                      </p>
-                    </div>
-                  </div>
-                ))}
-              </div>
+              <p className="px-6 py-4 text-sm text-muted-foreground">
+                Open this conversation from the chat screen to manage members.
+              </p>
             </div>
           )}
         </div>

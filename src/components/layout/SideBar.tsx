@@ -6,42 +6,57 @@ import {
   MessageSquarePlus,
   EllipsisVertical,
 } from 'lucide-react';
-import { useConversations } from '../contexts/ConversationsContext';
-import { useNavigate } from 'react-router';
+import { useConversations } from '../../contexts/ConversationsContext';
 import { formatDistanceToNow } from 'date-fns';
-import { useTheme } from '../contexts/ThemeContext';
-import logoDark from '../assets/culver/isolated-monochrome-black.svg';
-import logoLight from '../assets/culver/isolated-monochrome-white.svg';
-import NewChatModal from './NewChatModal';
+import { useTheme } from '../../contexts/ThemeContext';
+import logoDark from '../../assets/culver/isolated-monochrome-black.svg';
+import logoLight from '../../assets/culver/isolated-monochrome-white.svg';
+import NewChatModal from '../chat/NewChatModal';
 
 interface SidebarProps {
   resetContactView: () => void;
   activeTab: 'chats' | 'archived' | 'calls';
+  onOpenConversation: (conversationId: string) => void;
 }
 
-export default function Sidebar({ resetContactView, activeTab }: SidebarProps) {
+export default function Sidebar({
+  resetContactView,
+  activeTab,
+  onOpenConversation,
+}: SidebarProps) {
   const { theme } = useTheme();
   const logo = theme === 'light' ? logoDark : logoLight;
   const [searchQuery, setSearchQuery] = useState('');
-  const { conversations, selectConversation, selectedConversation } =
-    useConversations();
-  const navigate = useNavigate();
+  const { conversations, selectedConversation } = useConversations();
   const [activeGroup, setActiveGroup] = useState<'all' | 'unread' | 'groups'>(
     'all',
   );
 
+  const activeConversations = conversations.filter((c) => !c.isArchived);
+  const unreadCount = activeConversations.filter(
+    (c) => c.unread_count > 0,
+  ).length;
+  const groupCount = activeConversations.filter(
+    (c) => c.type === 'group',
+  ).length;
+
   const filteredConversations = conversations.filter((c) => {
-    const matchesSearch = c.name
+    const matchesSearch = (c.name ?? '')
       .toLowerCase()
       .includes(searchQuery.toLowerCase());
     const matchesTab = activeTab === 'archived' ? c.isArchived : !c.isArchived;
-    return matchesSearch && matchesTab;
+    const matchesGroup =
+      activeGroup === 'all'
+        ? true
+        : activeGroup === 'unread'
+          ? c.unread_count > 0
+          : c.type === 'group';
+    return matchesSearch && matchesTab && matchesGroup;
   });
 
   const handleConversationClick = (id: string) => {
     resetContactView();
-    selectConversation(id);
-    navigate(`/chat/${id}`);
+    onOpenConversation(id);
   };
 
   return (
@@ -52,7 +67,7 @@ export default function Sidebar({ resetContactView, activeTab }: SidebarProps) {
           {/* <span className="font-semibold text-sidebar-foreground">Culver</span> */}
           <div className="flex gap-4">
             <div>
-              <NewChatModal>
+              <NewChatModal onOpenConversation={onOpenConversation}>
                 <button className="p-2 text-muted-foreground rounded-full border-border cursor-pointer hover:text-sidebar-foreground transition-colors">
                   <MessageSquarePlus className="w-5 h-5 text-sidebar-foreground" />
                 </button>
@@ -95,7 +110,12 @@ export default function Sidebar({ resetContactView, activeTab }: SidebarProps) {
               : 'text-muted-foreground hover:text-sidebar-foreground'
           }`}
         >
-          Unread <span className="text-xs text-white rounded-full">3</span>
+          Unread{' '}
+          {unreadCount > 0 && (
+            <span className="text-xs bg-sidebar-primary text-white rounded-full px-1.5">
+              {unreadCount}
+            </span>
+          )}
         </button>
         <button
           onClick={() => setActiveGroup('groups')}
@@ -105,11 +125,16 @@ export default function Sidebar({ resetContactView, activeTab }: SidebarProps) {
               : 'text-muted-foreground hover:text-sidebar-foreground'
           }`}
         >
-          Groups <span className="text-xs text-white rounded-full">3</span>
+          Groups{' '}
+          {groupCount > 0 && (
+            <span className="text-xs bg-sidebar-primary text-white rounded-full px-1.5">
+              {groupCount}
+            </span>
+          )}
         </button>
       </div>
 
-      <div className="flex-1 overflow-y-auto">
+      <div className="flex-1 [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-thumb]:bg-gray-400 overflow-y-auto [&::-webkit-scrollbar-thumb]:rounded-[3px]">
         {activeTab === 'calls' ? (
           <div className="flex flex-col items-center justify-center h-full text-muted-foreground p-4">
             <Phone className="w-12 h-12 mb-2 opacity-50" />
@@ -134,31 +159,28 @@ export default function Sidebar({ resetContactView, activeTab }: SidebarProps) {
               >
                 <div className="relative shrink-0">
                   <div className="w-12 h-12 rounded-full bg-muted overflow-hidden">
-                    {conv.avatar ? (
+                    {conv.avatar_url ? (
                       <img
-                        src={conv.avatar}
-                        alt={conv.name}
+                        src={conv.avatar_url}
+                        alt={conv.name ?? ''}
                         className="w-full h-full object-cover"
                       />
                     ) : (
                       <div className="w-full h-full flex items-center justify-center text-muted-foreground">
-                        {conv.name.charAt(0)}
+                        {(conv.name ?? '?').charAt(0).toUpperCase()}
                       </div>
                     )}
                   </div>
-                  {conv.isOnline && (
-                    <div className="absolute bottom-0 right-0 w-3 h-3 bg-green-500 border-2 border-sidebar rounded-full" />
-                  )}
                 </div>
 
                 <div className="flex-1 min-w-0 text-left">
                   <div className="flex items-center justify-between mb-1">
                     <span className="font-medium text-sidebar-foreground truncate">
-                      {conv.name}
+                      {conv.name ?? 'Unknown'}
                     </span>
-                    {conv.lastMessage && (
+                    {conv.last_message_sent_at && (
                       <span className="text-xs text-muted-foreground shrink-0 ml-2">
-                        {formatDistanceToNow(conv.lastMessage.timestamp, {
+                        {formatDistanceToNow(conv.last_message_sent_at, {
                           addSuffix: false,
                         })}
                       </span>
@@ -166,11 +188,11 @@ export default function Sidebar({ resetContactView, activeTab }: SidebarProps) {
                   </div>
                   <div className="flex items-center justify-between">
                     <p className="text-sm text-muted-foreground truncate">
-                      {conv.lastMessage?.content || 'No messages yet'}
+                      {conv.last_message_ciphertext ?? 'No messages yet'}
                     </p>
-                    {conv.unreadCount > 0 && (
-                      <div className="shrink-0 ml-2 w-5 h-5 rounded-full bg-sidebar-primary text-sidebar-primary-foreground flex items-center justify-center text-xs absolute top-1/2 -translate-y-1/2 right-3">
-                        {conv.unreadCount}
+                    {conv.unread_count > 0 && (
+                      <div className="shrink-0 ml-2 w-5 h-5 rounded-full bg-sidebar-primary text-sidebar-primary-foreground flex items-center justify-center text-xs absolute bottom-0 -translate-y-1/2 right-3">
+                        {conv.unread_count}
                       </div>
                     )}
                   </div>

@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react';
+/* eslint-disable react-refresh/only-export-components */
+import { useEffect, useState, createContext, useContext } from 'react';
 import type { ReactNode } from 'react';
 import type { ConfirmationResult, User as FirebaseUser } from 'firebase/auth';
 import {
@@ -6,51 +7,16 @@ import {
   signInWithPhoneNumber,
   signOut,
 } from 'firebase/auth';
-import { apiClient } from '../lib/api';
 import { auth } from '../lib/firebase';
-import { AuthContext } from './authContext';
-import type { User } from './authTypes';
+import { fetchCurrentUserProfile, updateCurrentUser } from '../services';
+import type { AuthContextType, UpdateProfilePayload, User } from '../types';
 
-interface MeResponse {
-  data: {
-    user: {
-      id: string;
-      phone_number: string;
-      name: string | null;
-      avatar_url: string | null;
-      bio: string | null;
-      is_verified: boolean;
-    };
-  };
-}
-
-interface UpdateProfilePayload {
-  name?: string;
-  bio?: string;
-  avatar_url?: string | null;
-}
-
-function mapBackendUser(payload: MeResponse['data']['user']): User {
-  return {
-    id: payload.id,
-    phone_number: payload.phone_number,
-    name: payload.name || '',
-    avatar_url: payload.avatar_url,
-    is_verified: payload.is_verified,
-    avatar: payload.avatar_url || undefined,
-    bio: payload.bio || undefined,
-  };
-}
-
-async function fetchCurrentUserProfile() {
-  const response = await apiClient.get<MeResponse>('/auth/me');
-  return mapBackendUser(response.data.data.user);
-}
+const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(() => {
     const stored = localStorage.getItem('culver-user');
-    return stored ? JSON.parse(stored) : null;
+    return stored ? (JSON.parse(stored) as User) : null;
   });
   const [firebaseUser, setFirebaseUser] = useState<FirebaseUser | null>(
     () => auth.currentUser,
@@ -70,13 +36,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (nextFirebaseUser) => {
       setFirebaseUser(nextFirebaseUser);
-
       if (!nextFirebaseUser) {
         setUser(null);
         setIsAuthReady(true);
         return;
       }
-
       try {
         const profile = await fetchCurrentUserProfile();
         setUser(profile);
@@ -86,7 +50,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setIsAuthReady(true);
       }
     });
-
     return unsubscribe;
   }, []);
 
@@ -102,13 +65,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (!confirmationResult) {
       throw new Error('No OTP request found. Please request a new code.');
     }
-
     await confirmationResult.confirm(otp);
-
     if (fullName) {
-      await apiClient.patch('/users/me', { name: fullName.trim() });
+      await updateCurrentUser({ name: fullName.trim() });
     }
-
     const profile = await fetchCurrentUserProfile();
     setUser(profile);
   };
@@ -119,54 +79,37 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser(null);
   };
 
+  const refreshProfile = async () => {
+    const profile = await fetchCurrentUserProfile();
+    setUser(profile);
+  };
+
   const updateProfile = async (updates: Partial<User>) => {
-    if (!user) {
-      throw new Error('No authenticated user found.');
-    }
+    if (!user) throw new Error('No authenticated user found.');
 
     const payload: UpdateProfilePayload = {};
-
-    if (updates.name !== undefined) {
-      payload.name = updates.name.trim();
-    }
-
-    if (updates.bio !== undefined) {
-      payload.bio = updates.bio.trim();
-    }
-
-    if (updates.avatar_url !== undefined) {
+    if (updates.name !== undefined) payload.name = updates.name.trim();
+    if (updates.bio !== undefined) payload.bio = updates.bio.trim();
+    if (updates.avatar_url !== undefined)
       payload.avatar_url = updates.avatar_url;
-    }
 
-    if (Object.keys(payload).length === 0) {
-      return;
-    }
+    if (Object.keys(payload).length === 0) return;
 
-    const response = await apiClient.patch<MeResponse>('/users/me', payload);
-    const updatedUser = mapBackendUser(response.data.data.user);
-
+    const updatedUser = await updateCurrentUser(payload);
     setUser((currentUser) => ({
       ...(currentUser ?? updatedUser),
       ...updatedUser,
+      // Preserve client-only fields the backend doesn't return
       username: updates.username ?? currentUser?.username,
     }));
   };
 
-  /**
-   * Fallback for users who somehow end up with no name set.
-   * Also used by the SetupProfile page as a safety net.
-   */
   const completeSetup = async (fullName: string) => {
     const normalizedName = fullName.trim();
-    if (!normalizedName) {
-      throw new Error('Full name is required.');
-    }
-
+    if (!normalizedName) throw new Error('Full name is required.');
     await updateProfile({ name: normalizedName });
   };
 
-  // True if the user is authenticated but hasn't set a name yet
-  // (e.g. someone who signed up before this flow was added)
   const requiresSetup =
     !!firebaseUser && !!user && user.name.trim().length === 0;
 
@@ -179,6 +122,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         logout,
         completeSetup,
         updateProfile,
+        refreshProfile,
         isAuthenticated: !!firebaseUser,
         isAuthReady,
         requiresSetup,
@@ -187,4 +131,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       {children}
     </AuthContext.Provider>
   );
+}
+
+export function useAuth() {
+  const context = useContext(AuthContext);
+  if (!context) throw new Error('useAuth must be used within AuthProvider');
+  return context;
 }

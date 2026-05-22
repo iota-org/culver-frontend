@@ -1,3 +1,4 @@
+/* eslint-disable react-refresh/only-export-components */
 import { createContext, useContext, useEffect, useState, useRef } from 'react';
 import type { ReactNode } from 'react';
 import { io, Socket } from 'socket.io-client';
@@ -25,7 +26,10 @@ export const SocketProvider = ({ children }: { children: ReactNode }) => {
         // User is logged in — create socket connection
         const token = await firebaseUser.getIdToken();
 
-        socketRef.current = io('http://localhost:3000', {
+        const SOCKET_URL =
+          import.meta.env.VITE_SOCKET_URL || 'http://localhost:3000';
+
+        socketRef.current = io(SOCKET_URL, {
           auth: { token },
           reconnection: true,
           reconnectionAttempts: 5,

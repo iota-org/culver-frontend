@@ -1,10 +1,16 @@
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router';
-import { useAuth } from '../contexts/useAuth';
+import { useAuth } from '../contexts/AuthContext';
 import logoIcon from '../assets/culver/default-monochrome.svg';
 import { Lock, ArrowLeft } from 'lucide-react';
 import { RecaptchaVerifier } from 'firebase/auth';
 import { auth } from '../lib/firebase';
+import parsePhoneNumber, {
+  getCountries,
+  getCountryCallingCode,
+  type CountryCode,
+} from 'libphonenumber-js';
+import { checkUserExistsByPhone } from '../services/authService';
 
 type AuthMode = 'login' | 'signup';
 type Step = 'entry' | 'details' | 'otp';
@@ -15,6 +21,7 @@ export default function Login() {
 
   // Shared fields
   const [phone, setPhone] = useState('');
+  const [selectedCountry, setSelectedCountry] = useState<string>('NG');
   const [otp, setOtp] = useState('');
 
   // Signup-only fields
@@ -50,6 +57,18 @@ export default function Login() {
     recaptchaVerifierRef.current?.clear();
     recaptchaVerifierRef.current = null;
   };
+  const formatPhone = (phone: string) => {
+    const parsedPhone = parsePhoneNumber(
+      phone.trim(),
+      selectedCountry as CountryCode,
+    );
+    if (!parsedPhone || !parsedPhone.isValid()) {
+      setError('Please enter a valid phone number.');
+      return;
+    }
+
+    return parsedPhone.format('E.164');
+  };
 
   // Step 1 (login): phone → send OTP
   // Step 1 (signup): phone → go to details
@@ -57,17 +76,26 @@ export default function Login() {
     e.preventDefault();
     setError(null);
 
+    const formattedPhone = formatPhone(phone);
+    if (!formattedPhone) return;
+
     if (mode === 'signup') {
       // For signup, collect name first before sending OTP
       setStep('details');
       return;
     }
 
-    // Login: send OTP immediately
+    // Login: only send OTP for an existing backend user.
     setLoading(true);
     try {
+      const userExists = await checkUserExistsByPhone(formattedPhone);
+      if (!userExists) {
+        setError('No account exists with that phone number. Please sign up.');
+        return;
+      }
+
       const verifier = getRecaptchaVerifier();
-      await sendOtp(phone.trim(), verifier);
+      await sendOtp(formattedPhone, verifier);
       setStep('otp');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to send OTP.');
@@ -86,11 +114,19 @@ export default function Login() {
       setError('Please enter both first and last name.');
       return;
     }
+    const formattedPhone = formatPhone(phone);
+    if (!formattedPhone) return;
 
     setLoading(true);
     try {
+      const userExists = await checkUserExistsByPhone(formattedPhone);
+      if (userExists) {
+        setError('An account already exists with that phone number. Log in instead.');
+        return;
+      }
+
       const verifier = getRecaptchaVerifier();
-      await sendOtp(phone.trim(), verifier);
+      await sendOtp(formattedPhone, verifier);
       setStep('otp');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to send OTP.');
@@ -128,6 +164,7 @@ export default function Login() {
     setOtp('');
     setFirstName('');
     setLastName('');
+    setSelectedCountry('NG');
     setError(null);
     resetRecaptcha();
   };
@@ -189,15 +226,28 @@ export default function Login() {
                     Enter your phone number to get started
                   </p>
                 )}
-                <input
-                  id="phone"
-                  type="tel"
-                  value={phone}
-                  onChange={(e) => setPhone(e.target.value)}
-                  placeholder="+234 8011029924"
-                  className="w-full px-4 py-3 bg-input-background border border-input rounded-xl focus:outline-none focus:ring-2 focus:ring-ring placeholder:text-muted-foreground"
-                  required
-                />
+                <div className="flex items-center gap-2">
+                  <select
+                    value={selectedCountry}
+                    onChange={(e) => setSelectedCountry(e.target.value)}
+                    className="px-3 py-3 bg-input-background border border-input rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-ring shrink-0"
+                  >
+                    {getCountries().map((country) => (
+                      <option key={country} value={country}>
+                        +{getCountryCallingCode(country as CountryCode)}
+                      </option>
+                    ))}
+                  </select>
+                  <input
+                    id="phone"
+                    type="tel"
+                    value={phone}
+                    onChange={(e) => setPhone(e.target.value)}
+                    placeholder="8011029924"
+                    className="flex-1 px-4 py-3 bg-input-background border border-input rounded-xl focus:outline-none focus:ring-2 focus:ring-ring placeholder:text-muted-foreground"
+                    required
+                  />
+                </div>
               </div>
               <button
                 type="submit"
